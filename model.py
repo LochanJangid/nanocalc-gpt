@@ -59,6 +59,14 @@ class CasualMultiHeadAttention(nn.Module):
         out = out.contiguous().view(B, T, C)
         return self.proj(out)
         
+class FeedForward(nn.Module):
+    def __init__(self):
+        super().__init__()
+        hidden = 4*n_emb
+        self.ff = nn.Sequential(nn.Linear(n_emb, hidden), nn.ReLU(), nn.Linear(hidden, n_emb))
+
+    def forward(self, x):
+        return self.ff(x)
 
 class GPT(nn.Module):
     def __init__(self):
@@ -66,12 +74,14 @@ class GPT(nn.Module):
         self.token_embedding = nn.Embedding(vocab_size, n_emb)
         self.positional_embedding = nn.Embedding(context_size, n_emb)
         self.mh = CasualMultiHeadAttention()
+        self.ff = FeedForward()
 
     def forward(self, x):
         token_emb = self.token_embedding(x)
         pos_emb = self.positional_embedding(torch.arange(0, context_size))
         tok_pos = token_emb + pos_emb
-        out = self.mh(tok_pos)
+        attendence = self.mh(tok_pos)
+        out = self.ff(attendence)
         return out.shape
 
 model = GPT()
