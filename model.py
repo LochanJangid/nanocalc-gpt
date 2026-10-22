@@ -68,20 +68,31 @@ class FeedForward(nn.Module):
     def forward(self, x):
         return self.ff(x)
 
+class Block(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(n_emb)
+        self.mh = CasualMultiHeadAttention()
+        self.ln2 = nn.LayerNorm(n_emb)
+        self.ff = FeedForward()
+
+    def forward(self, x):
+        x = x + self.mh(self.ln1(x))
+        x = x + self.ff(self.ln2(x))
+        return x
+
 class GPT(nn.Module):
     def __init__(self):
         super().__init__()
         self.token_embedding = nn.Embedding(vocab_size, n_emb)
         self.positional_embedding = nn.Embedding(context_size, n_emb)
-        self.mh = CasualMultiHeadAttention()
-        self.ff = FeedForward()
+        self.block = Block()
 
     def forward(self, x):
         token_emb = self.token_embedding(x)
         pos_emb = self.positional_embedding(torch.arange(0, context_size))
         tok_pos = token_emb + pos_emb
-        attendence = self.mh(tok_pos)
-        out = self.ff(attendence)
+        out = self.block(tok_pos)
         return out.shape
 
 model = GPT()
