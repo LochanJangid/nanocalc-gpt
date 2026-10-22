@@ -1,4 +1,6 @@
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 data = [ch for example in open("data1.txt").readlines() for ch in example.strip()]
 chars = list("0123456789+=\n")
@@ -12,6 +14,7 @@ tokend_data = encode(data)
 # HYPERPARAMETERS
 context_size=10
 block_size=10
+n_emb=23
 
 def get_data():
     rand_idx = torch.randint(0, len(tokend_data)-context_size, (block_size, ))
@@ -19,8 +22,6 @@ def get_data():
     y = torch.stack([tokend_data[i+1:i+1+context_size] for i in rand_idx])
 
     return X, y
-
-print(get_data())
 
 # token embedding
 # position encoding
@@ -30,3 +31,20 @@ print(get_data())
     #   multi head attention
     # layer norm 
     # feed forward
+
+class GPT(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.token_embedding = nn.Embedding(vocab_size, n_emb)
+        self.positional_embedding = nn.Embedding(context_size, n_emb)
+
+    def forward(self, x):
+        token_emb = self.token_embedding(x)
+        pos_emb = self.positional_embedding(torch.arange(0, context_size))
+        tok_pos = token_emb + pos_emb
+
+        return tok_pos.shape
+
+model = GPT()
+X, y = get_data()
+print(model.forward(X))
