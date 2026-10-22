@@ -14,7 +14,9 @@ tokend_data = encode(data)
 # HYPERPARAMETERS
 context_size=10
 block_size=10
-n_emb=23
+n_head=4
+n_emb=32 # it should be devidable by n_head
+head_size=n_emb//n_head
 
 def get_data():
     rand_idx = torch.randint(0, len(tokend_data)-context_size, (block_size, ))
@@ -32,18 +34,45 @@ def get_data():
     # layer norm 
     # feed forward
 
+class CasualMultiHeadAttention(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.query = nn.Linear(n_emb, n_emb)
+        self.key = nn.Linear(n_emb, n_emb)
+        self.value = nn.Linear(n_emb, n_emb)
+        self.register_buffer("mask", torch.tril(torch.ones(context_size, context_size)))
+        self.proj = nn.Linear(n_emb, n_emb)
+
+    def forward(self, x):
+        # x: B, T, C
+        B, T, C = x.shape
+        # B, T, C -> B, T, n_head, head_size ## --> B, n_head, T, head_size
+        Q = self.query(x).view(B, T, n_head, head_size).transpose(1,2)
+        k = self.key(x).view(B, T, n_head, head_size).transpose(1,2)
+        V = self.value(x).view(B, T, n_head, head_size).transpose(1,2)
+        scores = Q @ k.transpose(2, 3) # becaueze matrix multiplication see only last 2 dim
+        scores = scores/head_size**0.5
+        scores = scores.masked_fill(self.mask[:T,:T] == 0, float("-inf"))
+        bow = F.softmax(scores, dim=-1)
+        out = bow @ V
+        out = out.transpose(1, 2)
+        out = out.contiguous().view(B, T, C)
+        return self.proj(out)
+        
+
 class GPT(nn.Module):
     def __init__(self):
         super().__init__()
         self.token_embedding = nn.Embedding(vocab_size, n_emb)
         self.positional_embedding = nn.Embedding(context_size, n_emb)
+        self.mh = CasualMultiHeadAttention()
 
     def forward(self, x):
         token_emb = self.token_embedding(x)
         pos_emb = self.positional_embedding(torch.arange(0, context_size))
         tok_pos = token_emb + pos_emb
-
-        return tok_pos.shape
+        out = self.mh(tok_pos)
+        return out.shape
 
 model = GPT()
 X, y = get_data()
