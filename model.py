@@ -105,7 +105,7 @@ class GPT(nn.Module):
         super().__init__()
         self.token_embedding = nn.Embedding(vocab_size, n_emb)
         self.positional_embedding = nn.Embedding(context_size, n_emb)
-        self.block = Block()
+        self.blocks = nn.Sequential(Block(), Block(),  Block())
         self.ln_layer = nn.Linear(n_emb, vocab_size)
 
     def forward(self, x):
