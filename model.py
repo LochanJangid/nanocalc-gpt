@@ -112,7 +112,7 @@ class GPT(nn.Module):
         token_emb = self.token_embedding(x)
         pos_emb = self.positional_embedding(torch.arange(0, x.shape[1], device=device))
         tok_pos = token_emb + pos_emb
-        out = self.block(tok_pos)
+        out = self.blocks(tok_pos)
         return self.ln_layer(out)
 
     def fit(self):
