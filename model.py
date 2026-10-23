@@ -32,7 +32,7 @@ torch.manual_seed(13457)
 
 def get_data(data="train"):
     data = train if data=="train" else test
-    rand_idx = torch.randint(0, len(data)-context_size-1, (batch_size, ))
+    rand_idx = torch.randint(0, len(data)//10-1, (batch_size, )) * 10
     X = torch.stack([data[i:i+context_size] for i in rand_idx])
     y = torch.stack([data[i+1:i+1+context_size] for i in rand_idx])
 
@@ -40,17 +40,19 @@ def get_data(data="train"):
 
 @torch.no_grad()
 def evaluation(model):
+    model.eval()
     train_lossi = []
     test_lossi = []
     for i in range(eval_iter):
         x, y = get_data("train")
         logits = model(x)
-        train_loss = F.cross_entropy(logits.view(-1, vocab_size), y.view(-1))
+        train_loss = F.cross_entropy(logits[:, 5:9].reshape(-1, vocab_size), y[:, 5:9].reshape(-1))
         x, y = get_data("test")
         logits = model(x)
-        test_loss = F.cross_entropy(logits.view(-1, vocab_size), y.view(-1))
+        test_loss = F.cross_entropy(logits[:, 5:9].reshape(-1, vocab_size), y[:, 5:9].reshape(-1))
         train_lossi.append(train_loss)
         test_lossi.append(test_loss)
+    model.train()
     return torch.tensor(train_lossi).mean(), torch.tensor(test_lossi).mean()
 
 class CasualMultiHeadAttention(nn.Module):
@@ -106,17 +108,19 @@ class GPT(nn.Module):
         self.token_embedding = nn.Embedding(vocab_size, n_emb)
         self.positional_embedding = nn.Embedding(context_size, n_emb)
         self.blocks = nn.Sequential(Block(), Block(),  Block())
+        self.l_norm = nn.LayerNorm(n_emb)
         self.ln_layer = nn.Linear(n_emb, vocab_size)
 
     def forward(self, x):
         token_emb = self.token_embedding(x)
         pos_emb = self.positional_embedding(torch.arange(0, x.shape[1], device=device))
         tok_pos = token_emb + pos_emb
-        out = self.blocks(tok_pos)
+        out = self.l_norm(self.blocks(tok_pos))
         return self.ln_layer(out)
 
     def fit(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=lr, maximize=False)
+        schedular = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=lr, total_steps=epochs, pct_start=0.03, anneal_strategy="cos")
         train_lossi = []
         test_lossi = []
         start = datetime.now()
@@ -124,12 +128,13 @@ class GPT(nn.Module):
             # Forward pass :|
             x, y = get_data("train")
             logits = self(x)
-            loss = F.cross_entropy(logits.view(-1, vocab_size), y.view(-1))
+            loss = F.cross_entropy(logits[:, 5:9].reshape(-1, vocab_size), y[:, 5:9].reshape(-1))
             # Backward Pass :\
             optimizer.zero_grad()
             loss.backward()
             # update parameters :)
             optimizer.step()
+            schedular.step() 
             # Evaluate
             if i%eval_time == 0:
                 train_loss, test_loss = evaluation(self)
