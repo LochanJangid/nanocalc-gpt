@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 
-chars = list("0123456789+=\n")
+chars = list("0123456789+*-/=\n")
 stoi = {s: i for i,s in enumerate(chars)}
 itos = {i: s for s, i in stoi.items()}
 vocab_size = len(itos)
@@ -17,14 +17,14 @@ test = [ch for example in open("test.txt").readlines() for ch in example.strip()
 test = encode(test)
 
 # HYPERPARAMETERS
-context_size=10
-batch_size=64
+context_size=12
+batch_size=128
 n_head=4
 n_emb=64 # it should be devidable by n_head
 head_size=n_emb//n_head
-epochs=10000
-lr=0.001
-eval_iter=300
+epochs=30000
+lr=1e-3
+eval_iter=50
 eval_time=epochs//20
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -32,7 +32,7 @@ torch.manual_seed(13457)
 
 def get_data(data="train"):
     data = train if data=="train" else test
-    rand_idx = torch.randint(0, len(data)//10-1, (batch_size, )) * 10
+    rand_idx = torch.randint(0, len(data)//12-1, (batch_size, )) * 12
     X = torch.stack([data[i:i+context_size] for i in rand_idx])
     y = torch.stack([data[i+1:i+1+context_size] for i in rand_idx])
 
@@ -46,10 +46,10 @@ def evaluation(model):
     for i in range(eval_iter):
         x, y = get_data("train")
         logits = model(x)
-        train_loss = F.cross_entropy(logits[:, 5:9].reshape(-1, vocab_size), y[:, 5:9].reshape(-1))
+        train_loss = F.cross_entropy(logits[:, 5:11].reshape(-1, vocab_size), y[:, 5:11].reshape(-1))
         x, y = get_data("test")
         logits = model(x)
-        test_loss = F.cross_entropy(logits[:, 5:9].reshape(-1, vocab_size), y[:, 5:9].reshape(-1))
+        test_loss = F.cross_entropy(logits[:, 5:11].reshape(-1, vocab_size), y[:, 5:11].reshape(-1))
         train_lossi.append(train_loss)
         test_lossi.append(test_loss)
     model.train()
@@ -107,7 +107,7 @@ class GPT(nn.Module):
         super().__init__()
         self.token_embedding = nn.Embedding(vocab_size, n_emb)
         self.positional_embedding = nn.Embedding(context_size, n_emb)
-        self.blocks = nn.Sequential(Block(), Block(),  Block())
+        self.blocks = nn.Sequential(Block(), Block(),  Block(), Block())
         self.l_norm = nn.LayerNorm(n_emb)
         self.ln_layer = nn.Linear(n_emb, vocab_size)
 
@@ -128,7 +128,7 @@ class GPT(nn.Module):
             # Forward pass :|
             x, y = get_data("train")
             logits = self(x)
-            loss = F.cross_entropy(logits[:, 5:9].reshape(-1, vocab_size), y[:, 5:9].reshape(-1))
+            loss = F.cross_entropy(logits[:, 5:11].reshape(-1, vocab_size), y[:, 5:11].reshape(-1))
             # Backward Pass :\
             optimizer.zero_grad()
             loss.backward()
