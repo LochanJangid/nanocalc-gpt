@@ -119,7 +119,7 @@ class GPT(nn.Module):
         return self.ln_layer(out)
 
     def fit(self):
-        optimizer = torch.optim.AdamW(self.parameters(), lr=lr, maximize=False)
+        optimizer = torch.optim.AdamW(self.parameters(), lr=lr, maximize=False, weight_decay=0.1)
         schedular = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=lr, total_steps=epochs, pct_start=0.03, anneal_strategy="cos")
         train_lossi = []
         test_lossi = []
