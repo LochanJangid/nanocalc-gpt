@@ -137,6 +137,30 @@ class GPT(nn.Module):
         out = self.l_norm(self.blocks(tok_pos))
         return self.ln_layer(out)
 
+    @torch.no_grad()
+    def generate(self, idx, max_new_tokens=5):
+        """
+        Takes conditioning token indices idx of shape (B, T) and generates
+        max_new_tokens greedily using autoregressive decoding.
+        """
+        for _ in range(max_new_tokens):
+            idx_cond = idx if idx.size(1) <= self.config.context_size else idx[:, -self.config.context_size:]
+            logits = self(idx_cond)
+            idx_next = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
+            idx = torch.cat((idx, idx_next), dim=1)
+        return idx
+
+    def get_num_params(self, non_embedding=False):
+        """
+        Returns the number of parameters in the model.
+        If non_embedding=True, excludes token and positional embeddings.
+        """
+        n_params = sum(p.numel() for p in self.parameters())
+        if non_embedding:
+            n_params -= self.positional_embedding.weight.numel()
+            n_params -= self.token_embedding.weight.numel()
+        return n_params
+
     def fit(self, epochs=None, lr=None):
         cfg = self.config
         epochs = epochs or getattr(cfg, "epochs", 30000)
@@ -147,7 +171,7 @@ class GPT(nn.Module):
         batch_size = getattr(cfg, "batch_size", 128)
         context_size = getattr(cfg, "context_size", 12)
 
-        optimizer = torch.optim.AdamW(self.parameters(), lr=lr, maximize=False)
+        optimizer = torch.optim.AdamW(self.parameters(), lr=lr, maximize=False, weight_decay=0.1)
         scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optimizer, max_lr=lr, total_steps=epochs, pct_start=0.03, anneal_strategy="cos"
         )
@@ -187,6 +211,27 @@ class GPT(nn.Module):
         plt.savefig(plots_dir / "loss.png", dpi=300, bbox_inches="tight")
         plt.savefig("loss.png", dpi=300, bbox_inches="tight")
         plt.close()
+
+
+# Lazy import exact match utilities
+def exact_match(*args, **kwargs):
+    from exact_match import exact_match as _exact_match
+    return _exact_match(*args, **kwargs)
+
+
+def exact_match_by_operator(*args, **kwargs):
+    from exact_match import exact_match_by_operator as _exact_match_by_operator
+    return _exact_match_by_operator(*args, **kwargs)
+
+
+def operator_accuracy(*args, **kwargs):
+    from exact_match import operator_accuracy as _operator_accuracy
+    return _operator_accuracy(*args, **kwargs)
+
+
+def load_saved_model(*args, **kwargs):
+    from exact_match import load_saved_model as _load_saved_model
+    return _load_saved_model(*args, **kwargs)
 
 
 if __name__ == "__main__":

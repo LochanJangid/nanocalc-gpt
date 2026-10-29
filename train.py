@@ -47,3 +47,9 @@ if __name__ == "__main__":
         model_path,
     )
     print(f"Saved model checkpoint to {model_path}")
+
+    # Evaluate exact match accuracy
+    from exact_match import exact_match
+    print("\nEvaluating exact match accuracy on test set...")
+    test_res = exact_match(model, data="test")
+    print(test_res.summary())
