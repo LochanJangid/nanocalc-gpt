@@ -89,21 +89,7 @@ class CasualMultiHeadAttention(nn.Module):
 class FeedForward(nn.Module):
     def __init__(self, config):
         super().__init__()
-        hidden = 4 * config.n_emb
-        self.ff = nn.Sequential(
-            nn.Linear(config.n_emb, hidden),
-            nn.ReLU(),
-            nn.Linear(hidden, config.n_emb),
-        )
-
-
-# Alias standard spelling while preserving original naming
-CausalMultiHeadAttention = CasualMultiHeadAttention
-
-
-class FeedForward(nn.Module):
-    def __init__(self, n_emb: int = 64):
-        super().__init__()
+        n_emb = getattr(config, "n_emb", config) if not isinstance(config, int) else config
         hidden = 4 * n_emb
         self.ff = nn.Sequential(
             nn.Linear(n_emb, hidden),
@@ -113,6 +99,10 @@ class FeedForward(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.ff(x)
+
+
+# Alias standard spelling while preserving original naming
+CausalMultiHeadAttention = CasualMultiHeadAttention
 
 
 class Block(nn.Module):

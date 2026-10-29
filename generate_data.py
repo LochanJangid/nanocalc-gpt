@@ -1,25 +1,48 @@
+"""
+generate_data.py — Generates synthetic arithmetic datasets for nanoCalc-GPT.
+
+Format Specification
+--------------------
+Every example is strictly 12 characters:
+    Prompt (6 chars):   AA{op}BB=
+    Target (5 chars):   {sign}DDDD
+    Delimiter (1 char): \\n
+
+Digit Reversal
+--------------
+- For '+', '-', '*': target digits are reversed (least significant first)
+  to align causal generation with right-to-left carry/borrow propagation.
+  Example: 11+06=+7100  (11 + 6 = 17, written as 7100)
+- For '/': target digits remain unreversed (most significant first)
+  matching long-division execution order.
+  Example: 84/06=+0014  (84 / 6 = 14, written as 0014)
+"""
 from collections import defaultdict
 from pathlib import Path
 import random
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
-SEED = 1337
-TEST_FRAC = 0.1
-WIDTH = 2
-N = 10 ** WIDTH  # 100 (operands 00 to 99)
-DATA_DIR = Path("data")
+SEED: int = 1337
+TEST_FRAC: float = 0.1
+WIDTH: int = 2
+N: int = 10 ** WIDTH  # 100 operands (00 to 99)
+DATA_DIR: Path = Path("data")
 
-# Result digits are reversed (least significant first) only for these operators.
-# Division keeps written order (most significant first), like long division.
-REVERSED_OPS = {"+", "-", "*"}
+# Only operations whose carries propagate from least-significant digit are reversed.
+# Division operates most-significant digit first (like long division) and remains unreversed.
+REVERSED_OPS: Set[str] = {"+", "-", "*"}
 
 
-def result(a: int, op: str, b: int):
+def result(a: int, op: str, b: int) -> Optional[int]:
+    """Compute arithmetic ground truth for operands a and b."""
     return {"+": a + b, "-": a - b, "*": a * b, "/": a // b if b else None}[op]
 
 
 def fmt(a: int, op: str, b: int) -> str:
+    """Format an arithmetic operation into the 12-character canonical representation."""
     r = result(a, op, b)
+    if r is None:
+        raise ValueError(f"Invalid operation: {a}{op}{b}")
     sign = "-" if r < 0 else "+"
     digits = str(abs(r)).zfill(4)
     if op in REVERSED_OPS:
@@ -28,7 +51,7 @@ def fmt(a: int, op: str, b: int) -> str:
 
 
 def decode(line: str) -> int:
-    """Answer of a formatted line as an integer (for verification)."""
+    """Extract and decode the integer answer from a formatted line for verification."""
     op = line[2]
     ans = line.strip().split("=")[1]
     digits = ans[1:]
@@ -39,6 +62,7 @@ def decode(line: str) -> int:
 
 
 def all_examples() -> Dict[str, List[Tuple[int, str, int]]]:
+    """Generate all valid 2-digit arithmetic pairs for +, -, *, and /."""
     ex = defaultdict(list)
     for a in range(N):
         for b in range(N):
@@ -50,13 +74,15 @@ def all_examples() -> Dict[str, List[Tuple[int, str, int]]]:
     return ex
 
 
-def generate_dataset(data_dir: Path = DATA_DIR):
+def generate_dataset(data_dir: Path = DATA_DIR) -> None:
+    """Generate balanced train.txt and test.txt files with exact 12-char formatting."""
     data_dir = Path(data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
 
     random.seed(SEED)
     train, test = [], []
     by_op_train = {}
+
     for op, items in all_examples().items():
         random.shuffle(items)
         n_test = int(len(items) * TEST_FRAC)
@@ -64,7 +90,7 @@ def generate_dataset(data_dir: Path = DATA_DIR):
         by_op_train[op] = items[n_test:]
         print(f"Operator '{op}': {len(items)} unique -> train {len(items) - n_test}, test {n_test}")
 
-    # Balance train dataset across operators by oversampling rare operations (e.g. division)
+    # Balance train dataset across operators by oversampling rare operations (e.g., division)
     target = max(len(v) for v in by_op_train.values())
     for op, items in by_op_train.items():
         reps = items * (target // len(items)) + items[: target % len(items)]
