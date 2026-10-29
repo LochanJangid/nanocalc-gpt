@@ -71,8 +71,8 @@ class CasualMultiHeadAttention(nn.Module):
         self.register_buffer("mask", torch.tril(torch.ones(config.context_size, config.context_size)))
         self.proj = nn.Linear(config.n_emb, config.n_emb)
 
-    def forward(self, x):
-        # x: B, T, C
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, T, C)
         B, T, C = x.shape
         # B, T, C -> B, T, n_head, head_size -> B, n_head, T, head_size
         Q = self.query(x).view(B, T, self.n_head, self.head_size).transpose(1, 2)
@@ -96,7 +96,22 @@ class FeedForward(nn.Module):
             nn.Linear(hidden, config.n_emb),
         )
 
-    def forward(self, x):
+
+# Alias standard spelling while preserving original naming
+CausalMultiHeadAttention = CasualMultiHeadAttention
+
+
+class FeedForward(nn.Module):
+    def __init__(self, n_emb: int = 64):
+        super().__init__()
+        hidden = 4 * n_emb
+        self.ff = nn.Sequential(
+            nn.Linear(n_emb, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, n_emb),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.ff(x)
 
 
@@ -108,7 +123,7 @@ class Block(nn.Module):
         self.ln2 = nn.LayerNorm(config.n_emb)
         self.ff = FeedForward(config)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x + self.mh(self.ln1(x))
         x = x + self.ff(self.ln2(x))
         return x
@@ -130,7 +145,10 @@ class GPT(nn.Module):
         self.l_norm = nn.LayerNorm(config.n_emb)
         self.ln_layer = nn.Linear(config.n_emb, config.vocab_size)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, T)
+        device = x.device
+        B, T = x.shape
         token_emb = self.token_embedding(x)
         pos_emb = self.positional_embedding(torch.arange(0, x.shape[1], device=x.device))
         tok_pos = token_emb + pos_emb
