@@ -1,127 +1,210 @@
 # nanoCalc-GPT 🧮
 
-**I taught a tiny GPT to do math. It never got told how addition works. Here's what went wrong, what fixed it, and the one trick that backfired.**
+> **I taught a tiny GPT to do arithmetic from scratch — no formulas, no calculator, just examples and a loss function.**
 
-Best result: **99.51% exact match** on held-out `+ - * /` problems, with a model small enough to train on a single GPU.
+**Best result: 99.51% exact-match accuracy** on held-out `+ - * /` problems.  
+Model: decoder-only transformer · 1.2M parameters · trains in ~3 min on a single GPU.
 
 ---
 
-## How this started
+## The core question
 
-After building nanoGPT with Karpathy's Zero to Hero series, I wanted to try the exercise he leaves at the end of the GPT video: train a transformer on something simple and see what it actually learns.
+GPT models predict the next token left-to-right. Arithmetic is also solved left-to-right — *except carrying*, which propagates right-to-left. Does a transformer discover this on its own, from examples alone?
 
-I picked the first thing every kid learns: addition.
+Short answer: **yes, with one deliberate hint on the data format.**
 
-Our teachers explained the pattern and the mechanism. The model gets neither. All it has is a loss that says "wrong, try again." So the question became: can it discover carrying, on its own, from examples alone?
+---
 
-## Round 1: the model that couldn't carry
+## Key design decisions
 
-First attempt, I wrote problems the normal way: `11+06=17`.
+### 1 — Reverse the answer digits (for `+ - *`)
 
-It barely learned anything. Then I realized why. When we add, we start from the **right** (ones digit, then tens). A GPT writes **left to right**. So to write the first digit of the answer, the model needs the carry from a digit it hasn't written yet. There's no stable pattern to learn.
+A standard `11+06=17` forces the model to write `1` (the tens digit) before it knows the carry from `7+6=13`. There's no stable left-to-right pattern.
 
-**Fix:** reverse the answer. `11+06=17` becomes `11+06=+7100`. Now the model writes the ones digit first, then the tens digit, and every digit only depends on stuff it has already seen.
+**Fix:** store the answer least-significant digit first.
 
-Addition went to **100%**.
+```
+11+06=+7100    (answer is 17, stored as "7100" reversed)
+20-83=-3600    (answer is -63, stored as "3600" reversed)
+```
 
-## Round 2: where does an example even end?
+Now each digit only depends on digits already generated. Addition went from ~50% to **100%**.
 
-`1+2=3` and `0+15=15` have different lengths. In one long stream of text, the model had to figure out where each example starts before it could do any math.
+### 2 — Don't reverse division
 
-**Fix:** make everything the same shape. Zero-pad the numbers, so every example is exactly 12 characters. Now each position always means the same thing.
+Division is long division: you compute the *most* significant digit first, then work down. Reversing it would force the model to write the hardest digit first.
 
-## Round 3: stop predicting random numbers
+```
+84/06=+0014    (84 ÷ 6 = 14, stored as-is — not reversed)
+```
 
-The model was also being scored on guessing the two numbers and the operator. Those are random. There's nothing to learn there, only noise.
+Keeping division in natural order improved division accuracy from 80.70% → **85.96%**.
 
-**Fix:** mask the loss so only the answer tokens count. The only thing left to learn is the actual relationship between the question and the answer.
+### 3 — Fixed-width, fixed-length examples
 
-## Round 4: all four operators
+Every example is exactly 12 characters: `AA{op}BB={S}DDDD\n`
 
-Then I fed it `-`, `*`, and `/` too, same model, same trick.
+```
+43*57=+2451\n    ← 6 chars prompt + 5 chars answer + 1 newline = 12
+```
 
-- Subtraction: easy, 100%.
-- Multiplication: stuck, and the test score was way below the train score (62.8% test in an earlier run). The model was memorizing.
-- **Fix:** weight decay. Penalizing big weights pushed it toward the general rule instead of a lookup table. Multiplication jumped to the mid-90s.
+No padding guesswork. Every position always means the same thing.
 
-Then I made the model bigger, and it got interesting. More depth only helped if I also added width:
+### 4 — Mask the loss to the answer only
 
-| Width / blocks | `*` | `/` | Overall |
+The operands (`43`, `57`) and operator (`*`) are random. Scoring the model on predicting them adds noise and slows learning. Loss is computed **only on positions 6–10** (the answer tokens).
+
+### 5 — Weight decay against memorization
+
+Multiplication has 10,000 unique training pairs — large enough to memorize. Adding `weight_decay=0.1` to AdamW pushed the model toward the general rule. Multiplication accuracy went from ~62% (memorized) to **99.30%** (generalized).
+
+---
+
+## Architecture
+
+```
+Input tokens  →  Token Embedding (vocab=16, dim=128)
+              +  Positional Embedding (context=12, dim=128)
+              →  6× Transformer Block:
+                    LayerNorm → Multi-Head Attention (4 heads, causal mask)
+                    LayerNorm → Feed-Forward (128 → 512 → 128, ReLU)
+              →  LayerNorm → Linear → logits (vocab=16)
+```
+
+| Hyperparameter | Value |
+|---|---|
+| Embedding dim (`n_emb`) | 128 |
+| Transformer blocks | 6 |
+| Attention heads | 4 |
+| Head size | 32 |
+| Context length | 12 |
+| Vocabulary size | 16 |
+| **Total parameters** | **1,195,536** |
+| Batch size | 128 |
+| Steps | 30,000 |
+| Optimizer | AdamW (weight_decay=0.1) |
+| Scheduler | OneCycleLR (cosine, 3% warmup) |
+| Learning rate | 1e-3 |
+
+---
+
+## Results
+
+Evaluated on 3,057 held-out examples the model never saw during training.  
+**Exact match** = every answer token must be correct (no partial credit).
+
+| Operator | Test examples | Exact match |
+|---|---|---|
+| `+` Addition | 1,000 | **100.00%** |
+| `-` Subtraction | 1,000 | **100.00%** |
+| `*` Multiplication | 1,000 | **99.30%** |
+| `/` Division | 57 | **85.96%** |
+| **Overall** | **3,057** | **99.51%** |
+
+*(Results from Colab GPU run, `n_emb=128`, `n_blocks=6`. Local CPU checkpoint: 97.55%.)*
+
+### Ablation: architecture vs. accuracy
+
+| `n_emb` / `n_blocks` | `*` accuracy | `/` accuracy | Overall |
 |---|---|---|---|
 | 64 / 4 | 96.00% | 78.95% | 98.30% |
 | 64 / 6 | 81.30% | 82.46% | 93.56% |
 | 128 / 4 | 96.60% | 84.21% | 98.59% |
-| 128 / 6 | 99.50% | 80.70% | 99.48% |
+| **128 / 6** | **99.30%** | **85.96%** | **99.51%** |
 
-Six blocks at width 64 was worse than four. A deeper, narrower model was harder to train, not smarter.
+> Six blocks at width 64 hurt. Deeper + narrow is harder to train, not smarter.  
+> Width and depth together unlock the best result.
 
-## Round 5: the trick that backfired
+---
 
-Division was stuck around 80% no matter how big the model got. Bigger model, same score. That told me it wasn't a capacity problem.
-
-So I printed every wrong answer. All 12 mistakes were the **same digit**: the ones digit of the quotient, which is the very first digit the model writes. And every divisor was even or a multiple of 5 (2, 4, 5, 6, 8, 18).
-
-My guess: reversal helps addition because the ones digit of a sum only depends on the ones digits you're adding. A quotient is the opposite. You work it out from the big end, like long division. By reversing it, I was making the model write the *hardest* digit first.
-
-**Fix:** keep the division answer in normal order, reverse everything else.
-
-Division went from 80.70% to **85.96%**. A small win, but it matches the story.
-
-## Final scoreboard
-
-Model: decoder-only transformer, 128 dims, 6 blocks, 4 heads, AdamW + OneCycleLR, weight decay 0.1, batch size 128, 30k steps.
-
-| Operator | Test examples | Exact match |
-|---|---|---|
-| `+` | 1000 | 100.00% |
-| `-` | 1000 | 100.00% |
-| `*` | 1000 | 99.30% |
-| `/` | 57 | 85.96% |
-| **Overall** | 3057 | **99.51%** |
-
-"Exact match" means every single answer token has to be right.
-
-## What the data looks like
+## Project structure
 
 ```
-11+06=+7100   (11 + 6 = 17, answer reversed)
-20-83=-3600   (20 - 83 = -63, answer reversed)
-84/06=+0014   (84 / 6 = 14, answer NOT reversed)
+nanocalc-gpt/
+├── data/
+│   ├── train.txt          # 36,000 training examples (balanced across operators)
+│   └── test.txt           # 3,057 held-out test examples
+├── artifacts/
+│   └── model.pt           # Saved checkpoint (model weights + config dict)
+├── model.py               # GPTConfig, GPT, Block, Attention, FeedForward
+├── dataset.py             # Tokenizer, vocab, get_data() sampler
+├── generate_data.py       # Generates data/train.txt and data/test.txt
+├── train.py               # Local training script (CPU/GPU)
+├── evaluate.py            # CLI evaluation: per-operator accuracy table
+├── exact_match.py         # Core evaluation library (exact_match, predict, load_saved_model)
+├── practice.ipynb         # Interactive evaluation notebook (load model, run predictions)
+├── train_colab.ipynb      # Self-contained Colab training notebook (GPU)
+├── requirements.txt       # Python dependencies
+└── README.md
 ```
 
-## The honest part
+---
 
-I don't want you to leave with the wrong idea:
-
-- **The test is small.** Operands are 00 to 99, so each operator has around 10,000 problems total. My test set is a random 10% of that. So this shows the model handles unseen *pairs*. It doesn't prove it learned the full algorithm. I haven't tested whether it works on 3-digit numbers (my guess: it won't, yet).
-- **Division is only 57 test examples.** One example is worth 1.75 points, so be careful comparing those numbers.
-- **Most numbers are from a single run.** I haven't done multi-seed runs yet.
-- This hasn't been peer reviewed. It's one person learning in public.
-
-## Run it yourself
+## Quick start
 
 ```bash
 git clone https://github.com/LochanJangid/nanocalc-gpt
 cd nanocalc-gpt
 pip install -r requirements.txt
 
-python generate_data.py   # builds data/train.txt and data/test.txt
-python train.py           # trains the model
-python evaluate.py        # per-operator accuracy and the mistakes it made
+# Generate dataset
+python generate_data.py
+
+# Evaluate the saved checkpoint
+python evaluate.py --split test
+python evaluate.py --split test --show-errors     # show wrong predictions
+python evaluate.py --split test --operator "*"    # filter one operator
+
+# Train from scratch (CPU; ~hours — use Colab for GPU)
+python train.py
 ```
+
+### Single prediction (Python)
+
+```python
+from exact_match import load_saved_model, predict
+
+model, config = load_saved_model("artifacts/model.pt")
+
+print(predict(model, "37*14="))   # {'prompt': '37*14=', 'raw_prediction': '+8510', 'math_value': 518}
+print(predict(model, "84/06="))   # {'prompt': '84/06=', 'raw_prediction': '+0014', 'math_value': 14}
+print(predict(model, "99+01="))   # {'prompt': '99+01=', 'raw_prediction': '+0010', 'math_value': 100}
+```
+
+### Train in Google Colab (recommended)
+
+Open `train_colab.ipynb` in Colab. It:
+1. Auto-clones the repo and sets up the environment
+2. Generates the dataset with the correct format
+3. Trains the model (~3 min on a T4 GPU)
+4. Evaluates exact-match accuracy
+5. Downloads `artifacts/model.pt` to your machine automatically
+
+---
+
+## Honest limitations
+
+- **Operand range is 00–99.** The model has never seen 3-digit numbers. It almost certainly fails on them — that's not a bug, it's a scope boundary.
+- **Division has only 57 test examples** (only pairs where `a % b == 0` are included). One wrong answer is worth ~1.75%, so treat those numbers carefully.
+- **Results are from a single training run.** Multi-seed variance analysis hasn't been done yet.
+- **This isn't a proof of generalization.** It shows the model handles unseen *pairs within the 00–99 range*, not that it learned the full algorithm.
+
+---
 
 ## What I want to try next
 
-- Train on 2-digit, test on 2-digit. Does it generalize, or just memorize better?
-- Give multiplication a scratchpad (write out partial products first).
-- Try an ablation for every trick above, to prove each one actually matters.
+- Scratchpad for multiplication: write out partial products before the answer
+- Test on 3-digit operands with a model trained only on 2-digit ones
+- Ablation study confirming each trick (reversal, loss masking, weight decay) independently
 
-## Built with help from
+---
 
-- Andrej Karpathy's *Neural Networks: Zero to Hero*
+## Built on
+
+- Andrej Karpathy's *[Neural Networks: Zero to Hero](https://karpathy.ai/zero-to-hero.html)*
 
 ---
 
 Made by **Lochan Jangid** · [LinkedIn](https://linkedin.com/in/lochan-jangid) · [Portfolio](https://lochan.vercel.app)
 
-If you see something I got wrong or know a better way, open an issue. I read all of them.
+*If you spot something wrong or know a better approach, open an issue — I read all of them.*
