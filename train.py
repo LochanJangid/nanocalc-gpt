@@ -9,7 +9,7 @@ from model import GPT, GPTConfig
 # Override defaults here as needed before constructing the config object.
 _N_EMB = 128     # embedding dimension; must be divisible by n_head
 _N_HEAD = 4
-_N_BLOCKS = 4
+_N_BLOCKS = 6
 _EPOCHS = 30000
 _LR = 1e-3
 

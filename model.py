@@ -16,7 +16,7 @@ class GPTConfig:
     n_emb: int = 128
     n_head: int = 4
     head_size: Optional[int] = None
-    n_blocks: int = 4
+    n_blocks: int = 6
     batch_size: int = 128
     epochs: int = 30000
     lr: float = 1e-3
