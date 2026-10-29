@@ -1,30 +1,29 @@
-from dataclasses import dataclass
+from dataclasses import asdict
 from pathlib import Path
 import torch
 from dataset import vocab_size
 from model import GPT, GPTConfig
 
 
-# HYPERPARAMETER CONFIG
-@dataclass
-class Config:
-    context_size: int = 12
-    batch_size: int = 128
-    n_head: int = 4
-    n_emb: int = 64  # must be divisible by n_head
-    head_size: int = 64 // 4
-    n_blocks: int = 4
-    epochs: int = 30000
-    lr: float = 1e-3
-    eval_iter: int = 50
-    eval_time: int = 30000 // 20
-    vocab_size: int = vocab_size
-    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+# Train using GPTConfig from model.py directly (single source of truth).
+# Override defaults here as needed before constructing the config object.
+_N_EMB = 128     # embedding dimension; must be divisible by n_head
+_N_HEAD = 4
+_N_BLOCKS = 4
+_EPOCHS = 30000
+_LR = 1e-3
 
 
 torch.manual_seed(13457)
 
-config = Config()
+config = GPTConfig(
+    n_emb=_N_EMB,
+    n_head=_N_HEAD,
+    n_blocks=_N_BLOCKS,
+    epochs=_EPOCHS,
+    lr=_LR,
+    vocab_size=vocab_size,
+)
 
 model = GPT(config)
 model.to(config.device)
@@ -35,14 +34,14 @@ if __name__ == "__main__":
     model.train()
     model.fit()
 
-    # Save model state_dict to artifacts
+    # Save model state_dict to artifacts with plain dict config
     artifacts_dir = Path("artifacts")
     artifacts_dir.mkdir(exist_ok=True)
     model_path = artifacts_dir / "model.pt"
     torch.save(
         {
             "model_state_dict": model.state_dict(),
-            "config": config,
+            "config": asdict(config),
         },
         model_path,
     )

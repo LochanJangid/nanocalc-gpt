@@ -9,6 +9,10 @@ WIDTH = 2
 N = 10 ** WIDTH  # 100 (operands 00 to 99)
 DATA_DIR = Path("data")
 
+# Result digits are reversed (least significant first) only for these operators.
+# Division keeps written order (most significant first), like long division.
+REVERSED_OPS = {"+", "-", "*"}
+
 
 def result(a: int, op: str, b: int):
     return {"+": a + b, "-": a - b, "*": a * b, "/": a // b if b else None}[op]
@@ -17,13 +21,20 @@ def result(a: int, op: str, b: int):
 def fmt(a: int, op: str, b: int) -> str:
     r = result(a, op, b)
     sign = "-" if r < 0 else "+"
-    return f"{a:02d}{op}{b:02d}={sign}{str(abs(r)).zfill(4)[::-1]}\n"
+    digits = str(abs(r)).zfill(4)
+    if op in REVERSED_OPS:
+        digits = digits[::-1]
+    return f"{a:02d}{op}{b:02d}={sign}{digits}\n"
 
 
 def decode(line: str) -> int:
     """Answer of a formatted line as an integer (for verification)."""
+    op = line[2]
     ans = line.strip().split("=")[1]
-    v = int(ans[1:][::-1])
+    digits = ans[1:]
+    if op in REVERSED_OPS:
+        digits = digits[::-1]
+    v = int(digits)
     return -v if ans[0] == "-" else v
 
 

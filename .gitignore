@@ -10,8 +10,12 @@ venv/
 env/
 ENV/
 
-# Model checkpoints
+# Model checkpoints (experiment / intermediate saves — not the main artifact)
 checkpoints/
+
+# Generated plots and images
+plots/
+*.png
 
 # IDE & Editor files
 .vscode/

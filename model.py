@@ -13,7 +13,7 @@ from dataset import get_data, vocab_size
 class GPTConfig:
     context_size: int = 12
     vocab_size: int = vocab_size
-    n_emb: int = 64
+    n_emb: int = 128
     n_head: int = 4
     head_size: Optional[int] = None
     n_blocks: int = 4

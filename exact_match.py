@@ -14,6 +14,10 @@ OPERATOR_NAMES: Dict[str, str] = {
     "/": "Division",
 }
 
+# Operations whose target digits are stored in reversed order (least significant first)
+# Note: Division keeps original written order (most significant first, e.g. 66/06=+0011)
+REVERSED_OPS: set = {"+", "-", "*"}
+
 OPERATOR_ALIASES: Dict[str, str] = {
     "+": "+", "add": "+", "addition": "+", "plus": "+",
     "-": "-", "sub": "-", "subtraction": "-", "minus": "-",
@@ -243,44 +247,90 @@ def load_saved_model(
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Compatibility shim: checkpoints saved with __main__.Config in train.py
-    if not hasattr(sys.modules.get("__main__"), "Config"):
-        try:
-            import train
-            sys.modules["__main__"].Config = train.Config
-        except Exception:
-            sys.modules["__main__"].Config = GPTConfig
+    # Compatibility shim: checkpoints saved with __main__.Config or __main__.GPTConfig
+    main_mod = sys.modules.get("__main__")
+    if main_mod is not None:
+        if not hasattr(main_mod, "GPTConfig"):
+            setattr(main_mod, "GPTConfig", GPTConfig)
+        if not hasattr(main_mod, "Config"):
+            try:
+                import train
+                setattr(main_mod, "Config", getattr(train, "Config", GPTConfig))
+            except Exception:
+                setattr(main_mod, "Config", GPTConfig)
+        if not hasattr(main_mod, "GPT"):
+            setattr(main_mod, "GPT", GPT)
 
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    # Try loading with weights_only=True first (clean dict configs), fallback to weights_only=False (legacy objects)
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    except Exception:
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+
+    state_dict = checkpoint.get("model_state_dict", checkpoint)
+
+    # Infer tensor dimensions directly from checkpoint weights (ground truth)
+    inferred_n_emb = None
+    inferred_vocab_size = None
+    inferred_context_size = None
+    inferred_n_blocks = None
+
+    if "token_embedding.weight" in state_dict:
+        inferred_vocab_size = state_dict["token_embedding.weight"].shape[0]
+        inferred_n_emb = state_dict["token_embedding.weight"].shape[1]
+    if "positional_embedding.weight" in state_dict:
+        inferred_context_size = state_dict["positional_embedding.weight"].shape[0]
+
+    block_nums = [
+        int(k.split(".")[1])
+        for k in state_dict.keys()
+        if k.startswith("blocks.") and len(k.split(".")) > 1 and k.split(".")[1].isdigit()
+    ]
+    if block_nums:
+        inferred_n_blocks = max(block_nums) + 1
 
     # Extract configuration
     raw_cfg = checkpoint.get("config", None)
     if isinstance(raw_cfg, GPTConfig):
         cfg = raw_cfg
-        cfg.device = str(device)
+    elif isinstance(raw_cfg, dict):
+        cfg_dict = dict(raw_cfg)
+        valid_keys = GPTConfig.__dataclass_fields__.keys()
+        filtered = {k: v for k, v in cfg_dict.items() if k in valid_keys}
+        cfg = GPTConfig(**filtered)
     elif raw_cfg is not None:
         cfg = GPTConfig(
-            context_size=getattr(raw_cfg, "context_size", 12),
-            vocab_size=getattr(raw_cfg, "vocab_size", vocab_size),
-            n_emb=getattr(raw_cfg, "n_emb", 64),
+            context_size=getattr(raw_cfg, "context_size", inferred_context_size or 12),
+            vocab_size=getattr(raw_cfg, "vocab_size", inferred_vocab_size or vocab_size),
+            n_emb=getattr(raw_cfg, "n_emb", inferred_n_emb or 128),
             n_head=getattr(raw_cfg, "n_head", 4),
             head_size=getattr(raw_cfg, "head_size", None),
-            n_blocks=getattr(raw_cfg, "n_blocks", 4),
+            n_blocks=getattr(raw_cfg, "n_blocks", inferred_n_blocks or 4),
             batch_size=getattr(raw_cfg, "batch_size", 128),
             lr=getattr(raw_cfg, "lr", 1e-3),
-            device=str(device),
         )
     else:
         cfg = GPTConfig(
-            context_size=checkpoint.get("context_size", 12),
-            vocab_size=checkpoint.get("vocab_size", vocab_size),
-            n_emb=checkpoint.get("n_emb", 64),
+            context_size=checkpoint.get("context_size", inferred_context_size or 12),
+            vocab_size=checkpoint.get("vocab_size", inferred_vocab_size or vocab_size),
+            n_emb=checkpoint.get("n_emb", inferred_n_emb or 128),
             n_head=checkpoint.get("n_head", 4),
-            device=str(device),
+            n_blocks=inferred_n_blocks or 4,
         )
 
+    # Ground truth alignment: override dimensions with actual weight tensor shapes
+    if inferred_n_emb is not None:
+        cfg.n_emb = inferred_n_emb
+    if inferred_vocab_size is not None:
+        cfg.vocab_size = inferred_vocab_size
+    if inferred_context_size is not None:
+        cfg.context_size = inferred_context_size
+    if inferred_n_blocks is not None:
+        cfg.n_blocks = inferred_n_blocks
+    cfg.head_size = cfg.n_emb // cfg.n_head
+    cfg.device = str(device)
+
     model = GPT(cfg)
-    state_dict = checkpoint.get("model_state_dict", checkpoint)
     model.load_state_dict(state_dict)
     model.to(device)
     model.eval()
@@ -289,15 +339,28 @@ def load_saved_model(
 
 def decode_arithmetic(prompt_str: str, ans_str: str) -> Optional[int]:
     """
-    Decodes the model's reversed answer representation back into an integer.
+    Decodes the model's answer representation back into an integer.
+    Addition, subtraction, and multiplication have reversed digits (LSB first).
+    Division maintains original digit order (MSB first, not reversed).
     Example: prompt='53+00=', ans='+3500' -> +53
+             prompt='66/06=', ans='+0011' -> +11
     """
     ans_str = ans_str.strip()
     if not ans_str or ans_str[0] not in ("+", "-"):
         return None
     try:
         sign = -1 if ans_str[0] == "-" else 1
-        return sign * int(ans_str[1:][::-1])
+        op = "+"
+        for candidate in ["+", "-", "*", "/"]:
+            if candidate in prompt_str[1:]:
+                op = candidate
+                break
+        digits = ans_str[1:]
+        # Only +, -, * are reversed (least significant digit first)
+        # Division is NOT reversed (original order, like long division)
+        if op in REVERSED_OPS:
+            digits = digits[::-1]
+        return sign * int(digits)
     except Exception:
         return None
 
