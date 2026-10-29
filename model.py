@@ -1,153 +1,197 @@
+from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
+from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
+from dataset import get_data, vocab_size
 
-chars = list("0123456789+*-/=\n")
-stoi = {s: i for i,s in enumerate(chars)}
-itos = {i: s for s, i in stoi.items()}
-vocab_size = len(itos)
-encode = lambda x: torch.tensor([stoi[s] for s in x])
-decode = lambda x: "".join([itos[itensor.item()] for itensor in x])
 
-train = [ch for example in open("train.txt").readlines() for ch in example.strip() + "\n"]
-train = encode(train)
-test = [ch for example in open("test.txt").readlines() for ch in example.strip() + "\n"]
-test = encode(test)
+@dataclass
+class GPTConfig:
+    context_size: int = 12
+    vocab_size: int = vocab_size
+    n_emb: int = 64
+    n_head: int = 4
+    head_size: Optional[int] = None
+    n_blocks: int = 4
+    batch_size: int = 128
+    epochs: int = 30000
+    lr: float = 1e-3
+    eval_iter: int = 50
+    eval_time: Optional[int] = None
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
-# HYPERPARAMETERS
-context_size=12
-batch_size=128
-n_head=4
-n_emb=64 # it should be devidable by n_head
-head_size=n_emb//n_head
-epochs=30000
-lr=1e-3
-eval_iter=50
-eval_time=epochs//20
-device = "cuda" if torch.cuda.is_available() else "cpu"
+    def __post_init__(self):
+        if self.head_size is None:
+            self.head_size = self.n_emb // self.n_head
+        if self.eval_time is None:
+            self.eval_time = max(1, self.epochs // 20)
 
-torch.manual_seed(13457)
-
-def get_data(data="train"):
-    data = train if data=="train" else test
-    rand_idx = torch.randint(0, len(data)//12-1, (batch_size, )) * 12
-    X = torch.stack([data[i:i+context_size] for i in rand_idx])
-    y = torch.stack([data[i+1:i+1+context_size] for i in rand_idx])
-
-    return X.to(device), y.to(device)
 
 @torch.no_grad()
-def evaluation(model):
+def evaluation(model, config=None):
+    if config is None:
+        config = getattr(model, "config", None)
     model.eval()
     train_lossi = []
     test_lossi = []
-    for i in range(eval_iter):
-        x, y = get_data("train")
+    eval_iter = getattr(config, "eval_iter", 50)
+    v_size = getattr(config, "vocab_size", vocab_size)
+    batch_size = getattr(config, "batch_size", 128)
+    context_size = getattr(config, "context_size", 12)
+    device = getattr(config, "device", next(model.parameters()).device)
+
+    for _ in range(eval_iter):
+        x, y = get_data("train", device=device, batch_size=batch_size, context_size=context_size)
         logits = model(x)
-        train_loss = F.cross_entropy(logits[:, 5:11].reshape(-1, vocab_size), y[:, 5:11].reshape(-1))
-        x, y = get_data("test")
+        train_loss = F.cross_entropy(logits[:, 5:11].reshape(-1, v_size), y[:, 5:11].reshape(-1))
+
+        x, y = get_data("test", device=device, batch_size=batch_size, context_size=context_size)
         logits = model(x)
-        test_loss = F.cross_entropy(logits[:, 5:11].reshape(-1, vocab_size), y[:, 5:11].reshape(-1))
-        train_lossi.append(train_loss)
-        test_lossi.append(test_loss)
+        test_loss = F.cross_entropy(logits[:, 5:11].reshape(-1, v_size), y[:, 5:11].reshape(-1))
+
+        train_lossi.append(train_loss.item())
+        test_lossi.append(test_loss.item())
+
     model.train()
     return torch.tensor(train_lossi).mean(), torch.tensor(test_lossi).mean()
 
+
 class CasualMultiHeadAttention(nn.Module):
-    def __init__(self):
+    def __init__(self, config):
         super().__init__()
-        self.query = nn.Linear(n_emb, n_emb)
-        self.key = nn.Linear(n_emb, n_emb)
-        self.value = nn.Linear(n_emb, n_emb)
-        self.register_buffer("mask", torch.tril(torch.ones(context_size, context_size)))
-        self.proj = nn.Linear(n_emb, n_emb)
+        self.n_head = config.n_head
+        self.head_size = getattr(config, "head_size", config.n_emb // config.n_head)
+        self.query = nn.Linear(config.n_emb, config.n_emb)
+        self.key = nn.Linear(config.n_emb, config.n_emb)
+        self.value = nn.Linear(config.n_emb, config.n_emb)
+        self.register_buffer("mask", torch.tril(torch.ones(config.context_size, config.context_size)))
+        self.proj = nn.Linear(config.n_emb, config.n_emb)
 
     def forward(self, x):
         # x: B, T, C
         B, T, C = x.shape
-        # B, T, C -> B, T, n_head, head_size ## --> B, n_head, T, head_size
-        Q = self.query(x).view(B, T, n_head, head_size).transpose(1,2)
-        k = self.key(x).view(B, T, n_head, head_size).transpose(1,2)
-        V = self.value(x).view(B, T, n_head, head_size).transpose(1,2)
-        scores = Q @ k.transpose(2, 3) # becaueze matrix multiplication see only last 2 dim
-        scores = scores/head_size**0.5
-        scores = scores.masked_fill(self.mask[:T,:T] == 0, float("-inf"))
+        # B, T, C -> B, T, n_head, head_size -> B, n_head, T, head_size
+        Q = self.query(x).view(B, T, self.n_head, self.head_size).transpose(1, 2)
+        k = self.key(x).view(B, T, self.n_head, self.head_size).transpose(1, 2)
+        V = self.value(x).view(B, T, self.n_head, self.head_size).transpose(1, 2)
+        scores = (Q @ k.transpose(2, 3)) / (self.head_size ** 0.5)
+        scores = scores.masked_fill(self.mask[:T, :T] == 0, float("-inf"))
         bow = F.softmax(scores, dim=-1)
         out = bow @ V
-        out = out.transpose(1, 2)
-        out = out.contiguous().view(B, T, C)
+        out = out.transpose(1, 2).contiguous().view(B, T, C)
         return self.proj(out)
-        
+
+
 class FeedForward(nn.Module):
-    def __init__(self):
+    def __init__(self, config):
         super().__init__()
-        hidden = 4*n_emb
-        self.ff = nn.Sequential(nn.Linear(n_emb, hidden), nn.ReLU(), nn.Linear(hidden, n_emb))
+        hidden = 4 * config.n_emb
+        self.ff = nn.Sequential(
+            nn.Linear(config.n_emb, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, config.n_emb),
+        )
 
     def forward(self, x):
         return self.ff(x)
 
+
 class Block(nn.Module):
-    def __init__(self):
+    def __init__(self, config):
         super().__init__()
-        self.ln1 = nn.LayerNorm(n_emb)
-        self.mh = CasualMultiHeadAttention()
-        self.ln2 = nn.LayerNorm(n_emb)
-        self.ff = FeedForward()
+        self.ln1 = nn.LayerNorm(config.n_emb)
+        self.mh = CasualMultiHeadAttention(config)
+        self.ln2 = nn.LayerNorm(config.n_emb)
+        self.ff = FeedForward(config)
 
     def forward(self, x):
         x = x + self.mh(self.ln1(x))
         x = x + self.ff(self.ln2(x))
         return x
 
+
 class GPT(nn.Module):
-    def __init__(self):
+    def __init__(self, config=None, **kwargs):
         super().__init__()
-        self.token_embedding = nn.Embedding(vocab_size, n_emb)
-        self.positional_embedding = nn.Embedding(context_size, n_emb)
-        self.blocks = nn.Sequential(Block(), Block(),  Block(), Block())
-        self.l_norm = nn.LayerNorm(n_emb)
-        self.ln_layer = nn.Linear(n_emb, vocab_size)
+        if config is None:
+            config = GPTConfig(**kwargs)
+        elif isinstance(config, dict):
+            config = GPTConfig(**config)
+        self.config = config
+
+        self.token_embedding = nn.Embedding(config.vocab_size, config.n_emb)
+        self.positional_embedding = nn.Embedding(config.context_size, config.n_emb)
+        n_blocks = getattr(config, "n_blocks", 4)
+        self.blocks = nn.Sequential(*[Block(config) for _ in range(n_blocks)])
+        self.l_norm = nn.LayerNorm(config.n_emb)
+        self.ln_layer = nn.Linear(config.n_emb, config.vocab_size)
 
     def forward(self, x):
         token_emb = self.token_embedding(x)
-        pos_emb = self.positional_embedding(torch.arange(0, x.shape[1], device=device))
+        pos_emb = self.positional_embedding(torch.arange(0, x.shape[1], device=x.device))
         tok_pos = token_emb + pos_emb
         out = self.l_norm(self.blocks(tok_pos))
         return self.ln_layer(out)
 
-    def fit(self):
+    def fit(self, epochs=None, lr=None):
+        cfg = self.config
+        epochs = epochs or getattr(cfg, "epochs", 30000)
+        lr = lr or getattr(cfg, "lr", 1e-3)
+        eval_time = getattr(cfg, "eval_time", max(1, epochs // 20))
+        device = getattr(cfg, "device", next(self.parameters()).device)
+        v_size = getattr(cfg, "vocab_size", vocab_size)
+        batch_size = getattr(cfg, "batch_size", 128)
+        context_size = getattr(cfg, "context_size", 12)
+
         optimizer = torch.optim.AdamW(self.parameters(), lr=lr, maximize=False)
-        schedular = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=lr, total_steps=epochs, pct_start=0.03, anneal_strategy="cos")
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer, max_lr=lr, total_steps=epochs, pct_start=0.03, anneal_strategy="cos"
+        )
         train_lossi = []
         test_lossi = []
         start = datetime.now()
         for i in range(epochs):
-            # Forward pass :|
-            x, y = get_data("train")
+            # Forward pass
+            x, y = get_data("train", device=device, batch_size=batch_size, context_size=context_size)
             logits = self(x)
-            loss = F.cross_entropy(logits[:, 5:11].reshape(-1, vocab_size), y[:, 5:11].reshape(-1))
-            # Backward Pass :\
+            loss = F.cross_entropy(logits[:, 5:11].reshape(-1, v_size), y[:, 5:11].reshape(-1))
+
+            # Backward pass
             optimizer.zero_grad()
             loss.backward()
-            # update parameters :)
+
+            # Update parameters
             optimizer.step()
-            schedular.step() 
+            scheduler.step()
+
             # Evaluate
-            if i%eval_time == 0:
-                train_loss, test_loss = evaluation(self)
+            if i % eval_time == 0:
+                train_loss, test_loss = evaluation(self, cfg)
                 train_lossi.append(train_loss.item())
                 test_lossi.append(test_loss.item())
-                print(f"{i} Train: {train_loss} Test: {test_loss}")
-        end = datetime.now()
-        duration = end-start
-        plt.plot(train_lossi)
-        plt.plot(test_lossi)
-        plt.title(f"Duration: {duration}")
-        plt.savefig("loss.png", dpi=300, bbox_inches="tight")
+                print(f"{i} Train: {train_loss:.4f} Test: {test_loss:.4f}")
 
-model = GPT()
-model.to(device)
-model.fit()
+        end = datetime.now()
+        duration = end - start
+        plots_dir = Path("plots")
+        plots_dir.mkdir(exist_ok=True)
+        plt.figure()
+        plt.plot(train_lossi, label="Train Loss")
+        plt.plot(test_lossi, label="Test Loss")
+        plt.title(f"Duration: {duration}")
+        plt.legend()
+        plt.savefig(plots_dir / "loss.png", dpi=300, bbox_inches="tight")
+        plt.savefig("loss.png", dpi=300, bbox_inches="tight")
+        plt.close()
+
+
+if __name__ == "__main__":
+    cfg = GPTConfig()
+    model = GPT(cfg)
+    model.to(cfg.device)
+    dummy_x = torch.randint(0, cfg.vocab_size, (2, cfg.context_size), device=cfg.device)
+    print("Sanity check forward output shape:", model(dummy_x).shape)
